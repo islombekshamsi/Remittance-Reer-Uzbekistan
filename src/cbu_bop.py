@@ -1,10 +1,12 @@
-"""Parsers for CBU Balance of Payments releases.
+"""Parsers for Uzbekistan Balance of Payments remittances.
 
-CBU's English BOP/IIP/ED publications are year-to-date cumulative within a
-calendar year, not discrete quarterly flows. The functions here (1) pull
-"Secondary income, credit" out of a single release and (2) difference those
-YTD figures into quarterly flows. Mixing those two steps is the easiest way
-to silently triple-count Q1 by year-end.
+Preferred source: the analytical-presentation workbook
+(`BOP_Analytical_Uzbekistan.xlsx`). Those cells are already discrete
+quarterly flows — do not run them through ytd_to_quarterly().
+
+Fallback: individual CBU English PDF/DOCX releases, which ARE year-to-date
+cumulative. Those must be differenced (Q2 = H1 − Q1, …) or Q1 is counted
+several times by year-end.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ NUMBER_RE = re.compile(
 )
 YEAR_RANGE_RE = re.compile(r"(20\d{2})\s*[-–]\s*(20\d{2})")
 YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
+PERIOD_HEADER_RE = re.compile(r"^20\d{2}-Q[1-4]$")
+ANALYTICAL_XLSX_NAME = "BOP_Analytical_Uzbekistan.xlsx"
 
 # Filename patterns CBU has actually used, oldest to newest. Order matters:
 # YYYYQn must win over a bare year, or 2026Q1 would be read as an annual file.
@@ -230,6 +234,79 @@ def _extract_from_pdf(path: Path, reporting_year: int) -> float:
     value = parse_secondary_income_from_text(text, reporting_year)
     print(f"[cbu-bop] {path.name}: Secondary income, credit = {value} mn USD (YTD)")
     return value
+
+
+def parse_analytical_bop_excel(path: Path) -> pd.Series:
+    """Read Secondary income, credits from the analytical BOP workbook.
+
+    CRITICAL: this workbook is already discrete quarterly flows (2005Q1
+    onward), the same BPM6 analytic presentation as CBU Addenda 1. Passing
+    it through ytd_to_quarterly() would subtract adjacent quarters that are
+    not cumulative and silently deflate the series. Do not difference.
+    """
+    raw = pd.read_excel(path, header=None, sheet_name=0)
+    period_row: int | None = None
+    for i, row in raw.iterrows():
+        first = next((str(v).strip() for v in row.iloc[1:] if pd.notna(v)), "")
+        if PERIOD_HEADER_RE.match(first):
+            period_row = int(i)
+            break
+    if period_row is None:
+        raise CbuBopParseError(
+            f"{path.name}: no 'YYYY-Qn' header row. Expected the IMF/CBU "
+            "analytical presentation (periods across columns, line items down)."
+        )
+
+    period_vals = [str(v).strip() for v in raw.iloc[period_row, 1:] if pd.notna(v)]
+    bad = [p for p in period_vals if not PERIOD_HEADER_RE.match(p)]
+    if bad:
+        raise CbuBopParseError(
+            f"{path.name}: unrecognised period labels {bad[:5]}. "
+            "Not guessing — a misaligned column would shift the whole series."
+        )
+    periods = pd.PeriodIndex(period_vals, freq="Q")
+
+    labels = (
+        raw.iloc[:, 0]
+        .fillna("")
+        .astype(str)
+        .str.replace("\xa0", " ", regex=False)
+        .str.strip()
+    )
+    hits = [
+        i
+        for i, lab in labels.items()
+        if i > period_row and ROW_LABEL_RE.search(lab) and not DEBIT_RE.search(lab)
+    ]
+    if not hits:
+        raise CbuBopParseError(
+            f"{path.name}: no 'Secondary income, credits' row. "
+            "Personal transfers / compensation of employees are not in this table."
+        )
+    if len(hits) > 1:
+        print(
+            f"[cbu-bop] WARNING: {len(hits)} matching credit rows in {path.name}; "
+            f"using the first (row {hits[0] + 1})."
+        )
+
+    values = pd.to_numeric(
+        raw.iloc[hits[0], 1 : 1 + len(periods)].to_numpy(),
+        errors="coerce",
+    )
+    s = pd.Series(values, index=periods, name="remittances_mn_usd", dtype="float64")
+    n_nan = int(s.isna().sum())
+    if n_nan:
+        nan_periods = [str(p) for p in s.index[s.isna()][:12]]
+        print(
+            f"[cbu-bop] WARNING: {n_nan} NaN(s) in Secondary income, credits "
+            f"({nan_periods}{'...' if n_nan > 12 else ''}). Not filling."
+        )
+    print(
+        f"[cbu-bop] {path.name}: Secondary income, credits already quarterly "
+        f"{s.index.min()}–{s.index.max()} ({len(s)} obs, min={s.min():.1f}, "
+        f"max={s.max():.1f} mn USD). NOT differencing — this is not YTD."
+    )
+    return s
 
 
 def ytd_to_quarterly(ytd: pd.Series) -> pd.Series:

@@ -36,14 +36,11 @@ TODO(v2): switch to the IMF BOP database (data.imf.org) disaggregated
 series — personal transfers + compensation of employees — once that
 pull is implemented.
 
-The CBU PDF/DOCX releases are **year-to-date cumulative**, not discrete
-quarterly flows. `ytd_to_quarterly()` differences them (Q2 = H1 − Q1,
-and so on). Dropping that step would count Q1 several times by year-end.
-
-Drop English releases from
-[cbu.uz/en/publications/balance-of-payments/](https://cbu.uz/en/publications/balance-of-payments/)
-into `data/raw/manual/` (names like `eng_BOP_IIP_ED_2025Q3.pdf`; prefer
-the `.docx` twin for 2019–2023), then:
+The preferred source is `data/raw/manual/BOP_Analytical_Uzbekistan.xlsx`
+(BPM6 analytic presentation). Those figures are **already discrete
+quarterly flows** — `pull_cbu_bop_remittances()` does not difference them.
+Individual CBU PDF/DOCX releases are year-to-date and only used as a
+fallback (via `ytd_to_quarterly()`).
 
 ```
 python src/data_pull.py          # FX + FRED (cached under data/raw/)

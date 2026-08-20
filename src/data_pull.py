@@ -6,11 +6,10 @@ API key required:
   - CBU exchange rate archive (cbu.uz)      -> daily USD/UZS, RUB/UZS
   - FRED public CSV export (fred.stlouisfed.org) -> RUB/USD, Brent crude
 
-CBU Balance of Payments remittances are parsed from manually downloaded
-releases (no stable API). Drop files in data/raw/manual/ named like
-eng_BOP_IIP_ED_2025Q3.pdf — those publications are year-to-date
-cumulative, so pull_cbu_bop_remittances() differences them into discrete
-quarterly flows before caching. stat.uz CPI is still a stub.
+CBU Balance of Payments remittances are parsed from a manually downloaded
+analytical workbook (BOP_Analytical_Uzbekistan.xlsx) — already discrete
+quarterly flows, so they are NOT run through ytd_to_quarterly(). Individual
+CBU PDF/DOCX releases remain a YTD fallback. stat.uz CPI is still a stub.
 
 This script only pulls and caches RAW data to data/raw/. It does not
 resample, align frequencies, or merge — that belongs in build_panel.py,
@@ -42,7 +41,9 @@ import pandas as pd
 import requests
 
 from cbu_bop import (
+    ANALYTICAL_XLSX_NAME,
     extract_secondary_income_credit,
+    parse_analytical_bop_excel,
     select_preferred_releases,
     ytd_to_quarterly,
 )
@@ -166,34 +167,53 @@ def pull_fred_series(series_id: str, start: str | None = None, end: str | None =
 # MANUAL_DIR yourself, then implement the parse below.
 # --------------------------------------------------------------------------
 
+def _analytical_xlsx_in_manual() -> Path | None:
+    preferred = MANUAL_DIR / ANALYTICAL_XLSX_NAME
+    if preferred.exists():
+        return preferred
+    xlsx = sorted(
+        p for p in MANUAL_DIR.glob("*.xlsx")
+        if not p.name.startswith("~$") and not p.name.startswith(".")
+    )
+    if not xlsx:
+        return None
+    if len(xlsx) > 1:
+        print(
+            f"[cbu-bop] WARNING: multiple .xlsx in {MANUAL_DIR}: "
+            f"{[p.name for p in xlsx]}. Using {xlsx[0].name}. Prefer naming "
+            f"the analytical workbook {ANALYTICAL_XLSX_NAME}."
+        )
+    return xlsx[0]
+
+
 def pull_cbu_bop_remittances() -> pd.DataFrame:
-    """CBU BOP remittances proxy from manually downloaded quarterly releases.
+    """CBU/IMF BOP remittances proxy from a manually downloaded file.
 
     THIS is the remittances series — the FX archive above is just the
-    exchange rate. There is no CBU API for BOP tables; download the English
-    publications from cbu.uz/en/publications/balance-of-payments/ into
-    data/raw/manual/. Expected names look like:
+    exchange rate. Preferred input is data/raw/manual/BOP_Analytical_Uzbekistan.xlsx
+    (BPM6 analytic presentation, million USD, already discrete quarters).
+    That file is NOT year-to-date; differencing it would deflate the series.
 
-        eng_BOP_IIP_ED_2026Q1.pdf
-        eng_BOP_IIP_ED_2025Q2.pdf   # H1 2025 cumulative
-        eng_BOP_IIP_ED_2025Q3.pdf   # 9-month 2025 cumulative
-        eng_BOP_IIP_9M_2023.docx    # older twins; prefer .docx over .pdf
+    Fallback: English CBU PDF/DOCX releases in the same folder, which ARE
+    YTD cumulative and go through ytd_to_quarterly().
 
-    2024+ releases are PDF-only (parsed with pdfplumber). 2019–2023 have
-    .docx twins — those are preferred because python-docx reads the Addenda 1
-    table as a real table, whereas recent PDFs fragment it.
-
-    v1 line item is "Secondary income, credit", not personal transfers +
-    compensation of employees (those rows are not in Addenda 1). That is a
-    known simplification — see the README.
-
-    Each file is YTD cumulative, not a quarterly flow. This function
-    differences them via ytd_to_quarterly() before writing the cache.
+    v1 line item is "Secondary income, credits", not personal transfers +
+    compensation of employees (those rows are not in Addenda 1). See README.
     """
     cache_path = RAW_DIR / "cbu_bop_remittances.csv"
     if cache_path.exists():
         print(f"[cbu-bop] using cached {cache_path.name}")
         return pd.read_csv(cache_path, index_col=0, parse_dates=True)
+
+    xlsx = _analytical_xlsx_in_manual()
+    if xlsx is not None:
+        flows = parse_analytical_bop_excel(xlsx)
+        out = pd.DataFrame({"remittances_mn_usd": flows})
+        out.index = out.index.to_timestamp(how="start")
+        out.index.name = "date"
+        out.to_csv(cache_path)
+        print(f"[cbu-bop] wrote {cache_path} ({len(flows)} quarters from {xlsx.name})")
+        return out
 
     files = [
         p for p in MANUAL_DIR.iterdir()
@@ -202,12 +222,17 @@ def pull_cbu_bop_remittances() -> pd.DataFrame:
     ]
     if not files:
         raise FileNotFoundError(
-            f"No CBU BOP releases in {MANUAL_DIR}. Download the English "
-            "PDF/DOCX files from cbu.uz/en/publications/balance-of-payments/ "
-            "(names like eng_BOP_IIP_ED_2025Q3.pdf) into that folder, then "
-            "re-run pull_cbu_bop_remittances(). Do not skip this series."
+            f"No BOP file in {MANUAL_DIR}. Drop {ANALYTICAL_XLSX_NAME} "
+            "(preferred — already quarterly) or CBU English PDF/DOCX releases "
+            "from cbu.uz/en/publications/balance-of-payments/, then re-run "
+            "pull_cbu_bop_remittances(). Do not skip this series."
         )
 
+    print(
+        "[cbu-bop] no analytical xlsx found; falling back to PDF/DOCX YTD "
+        "releases. These must be differenced — they are cumulative within "
+        "the calendar year, unlike BOP_Analytical_Uzbekistan.xlsx."
+    )
     chosen = select_preferred_releases(files)
     ytd_rows: list[dict] = []
     for (year, quarter), path in sorted(chosen.items()):

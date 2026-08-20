@@ -6,11 +6,14 @@ bug that would look like a beautiful remittance series later.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from cbu_bop import (
     CbuBopParseError,
+    parse_analytical_bop_excel,
     parse_cbu_number,
     parse_release_period,
     parse_secondary_income_from_text,
@@ -118,3 +121,55 @@ def test_parse_secondary_income_picks_reporting_year_column():
 )
 def test_parse_cbu_number(raw: str, expected: float):
     assert parse_cbu_number(raw) == pytest.approx(expected)
+
+
+def test_analytical_xlsx_is_kept_as_quarterly_flows_not_differenced(tmp_path):
+    """The workbook is already quarterly. Differencing would turn 250 into 150."""
+    from openpyxl import Workbook
+
+    path = tmp_path / "BOP_Analytical_Uzbekistan.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "Balance of Payments of Uzbekistan"
+    ws["A2"] = "million USD"
+    ws["B4"] = "2024-Q1"
+    ws["C4"] = "2024-Q2"
+    ws["D4"] = "2024-Q3"
+    ws["E4"] = "2024-Q4"
+    ws["A14"] = "Secondary income, credits"
+    ws["B14"] = 100.0
+    ws["C14"] = 250.0  # would become 150 if someone ran ytd_to_quarterly
+    ws["D14"] = 180.0
+    ws["E14"] = 90.0
+    ws["A15"] = "Secondary income, debits"
+    ws["B15"] = 10.0
+    ws["C15"] = 12.0
+    ws["D15"] = 11.0
+    ws["E15"] = 9.0
+    wb.save(path)
+
+    s = parse_analytical_bop_excel(path)
+    assert list(s.index.astype(str)) == ["2024Q1", "2024Q2", "2024Q3", "2024Q4"]
+    assert s[pd.Period("2024Q2")] == pytest.approx(250.0)
+    assert s[pd.Period("2024Q3")] == pytest.approx(180.0)
+
+
+def test_real_analytical_xlsx_matches_known_cbu_vintages():
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "data" / "raw" / "manual" / "BOP_Analytical_Uzbekistan.xlsx"
+    )
+    if not path.exists():
+        pytest.skip("analytical workbook not in data/raw/manual/")
+    s = parse_analytical_bop_excel(path)
+    assert s.index.min() == pd.Period("2005Q1")
+    assert s.index.max() == pd.Period("2026Q1")
+    assert len(s) == 85
+    assert int(s.isna().sum()) == 0
+    # Later CBU annual vintages, not the preliminary 2023 Q1 PDF.
+    assert s.loc["2023"].sum() == pytest.approx(9685.4, abs=0.2)
+    assert s.loc["2024"].sum() == pytest.approx(11595.1, abs=0.2)
+    assert s.loc["2026Q1"] == pytest.approx(2906.9, abs=0.2)
+    # If this were YTD, 2025Q3 would be ~10,859 not ~4,858.
+    assert s.loc["2025Q3"] < 6000
+

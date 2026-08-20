@@ -5,8 +5,9 @@ Frequencies coming in:
   CBU FX          monthly (already sampled at month-start)
   FRED RUB/USD    monthly
   FRED Brent      daily  -> monthly mean
-  CBU BOP         quarterly YTD, already differenced to quarterly flows
-                  by pull_cbu_bop_remittances() -> upsample to monthly here
+  CBU BOP         quarterly flows (analytical xlsx, already discrete;
+                  PDF/DOCX fallback is YTD-differenced in data_pull)
+                  -> upsample to monthly here
 
 Upsampling the remittance series is not a free lunch. The default is a step
 function (hold the quarterly flow constant across its three months) because
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from cbu_bop import ANALYTICAL_XLSX_NAME
 from data_pull import FRED_SERIES, RAW_DIR
 
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
@@ -251,16 +253,17 @@ def _load_remittances() -> pd.Series:
     path = RAW_DIR / "cbu_bop_remittances.csv"
     if not path.exists():
         raise FileNotFoundError(
-            f"No remittances cache at {path}. Drop CBU BOP PDF/DOCX files in "
-            "data/raw/manual/ and run pull_cbu_bop_remittances() first — "
-            "do not build the panel without this series."
+            f"No remittances cache at {path}. Drop {ANALYTICAL_XLSX_NAME} "
+            "(or CBU PDF/DOCX releases) in data/raw/manual/ and run "
+            "pull_cbu_bop_remittances() first — do not build the panel "
+            "without this series."
         )
     print(f"[panel] loading {path.name}")
     df = pd.read_csv(path, index_col=0, parse_dates=True)
     if "remittances_mn_usd" not in df.columns:
         raise ValueError(
             f"{path.name} has columns {list(df.columns)}; expected "
-            "remittances_mn_usd (the differenced quarterly flow, not YTD)."
+            "remittances_mn_usd (the quarterly flow, not a YTD cumulative)."
         )
     s = pd.to_numeric(df["remittances_mn_usd"], errors="coerce")
     s.name = "remittances_mn_usd"
