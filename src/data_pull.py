@@ -6,12 +6,11 @@ API key required:
   - CBU exchange rate archive (cbu.uz)      -> daily USD/UZS, RUB/UZS
   - FRED public CSV export (fred.stlouisfed.org) -> RUB/USD, Brent crude
 
-Two sources stubbed out below, because neither has a stable public API —
-both require a manual download that you point these functions at:
-  - CBU Balance of Payments (personal transfers + compensation of
-    employees — this is your actual remittances figure, the FX archive
-    above is NOT remittances, just the exchange rate)
-  - stat.uz CPI
+CBU Balance of Payments remittances are parsed from manually downloaded
+releases (no stable API). Drop files in data/raw/manual/ named like
+eng_BOP_IIP_ED_2025Q3.pdf — those publications are year-to-date
+cumulative, so pull_cbu_bop_remittances() differences them into discrete
+quarterly flows before caching. stat.uz CPI is still a stub.
 
 This script only pulls and caches RAW data to data/raw/. It does not
 resample, align frequencies, or merge — that belongs in build_panel.py,
@@ -41,6 +40,12 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+
+from cbu_bop import (
+    extract_secondary_income_credit,
+    select_preferred_releases,
+    ytd_to_quarterly,
+)
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 MANUAL_DIR = RAW_DIR / "manual"
@@ -162,26 +167,68 @@ def pull_fred_series(series_id: str, start: str | None = None, end: str | None =
 # --------------------------------------------------------------------------
 
 def pull_cbu_bop_remittances() -> pd.DataFrame:
-    """CBU Balance of Payments: personal transfers + compensation of
-    employees. THIS is the actual remittances series — the FX archive
-    above is just the exchange rate, not remittance flows.
+    """CBU BOP remittances proxy from manually downloaded quarterly releases.
 
-    No API for this. CBU publishes it as quarterly BOP release tables
-    under cbu.uz/en/statistics/.
+    THIS is the remittances series — the FX archive above is just the
+    exchange rate. There is no CBU API for BOP tables; download the English
+    publications from cbu.uz/en/publications/balance-of-payments/ into
+    data/raw/manual/. Expected names look like:
 
-    TODO:
-      1. Download the latest BOP release (Excel) from cbu.uz/en/statistics/
-      2. Save to data/raw/manual/cbu_bop_<release_date>.xlsx
-      3. Locate the "Personal transfers" and "Compensation of employees"
-         rows (label wording has shifted release to release — check both
-         English and Russian/Uzbek versions if the English release lags)
-      4. Parse and sum them here, indexed by quarter
+        eng_BOP_IIP_ED_2026Q1.pdf
+        eng_BOP_IIP_ED_2025Q2.pdf   # H1 2025 cumulative
+        eng_BOP_IIP_ED_2025Q3.pdf   # 9-month 2025 cumulative
+        eng_BOP_IIP_9M_2023.docx    # older twins; prefer .docx over .pdf
+
+    2024+ releases are PDF-only (parsed with pdfplumber). 2019–2023 have
+    .docx twins — those are preferred because python-docx reads the Addenda 1
+    table as a real table, whereas recent PDFs fragment it.
+
+    v1 line item is "Secondary income, credit", not personal transfers +
+    compensation of employees (those rows are not in Addenda 1). That is a
+    known simplification — see the README.
+
+    Each file is YTD cumulative, not a quarterly flow. This function
+    differences them via ytd_to_quarterly() before writing the cache.
     """
-    raise NotImplementedError(
-        f"Drop CBU BOP Excel release(s) in {MANUAL_DIR} and implement the parse. "
-        "Table layout changes release to release, so this isn't safely "
-        "automatable without eyeballing each file first."
-    )
+    cache_path = RAW_DIR / "cbu_bop_remittances.csv"
+    if cache_path.exists():
+        print(f"[cbu-bop] using cached {cache_path.name}")
+        return pd.read_csv(cache_path, index_col=0, parse_dates=True)
+
+    files = [
+        p for p in MANUAL_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in {".pdf", ".docx"}
+        and not p.name.startswith(".")
+    ]
+    if not files:
+        raise FileNotFoundError(
+            f"No CBU BOP releases in {MANUAL_DIR}. Download the English "
+            "PDF/DOCX files from cbu.uz/en/publications/balance-of-payments/ "
+            "(names like eng_BOP_IIP_ED_2025Q3.pdf) into that folder, then "
+            "re-run pull_cbu_bop_remittances(). Do not skip this series."
+        )
+
+    chosen = select_preferred_releases(files)
+    ytd_rows: list[dict] = []
+    for (year, quarter), path in sorted(chosen.items()):
+        value = extract_secondary_income_credit(path, reporting_year=year)
+        period = pd.Period(year=year, quarter=quarter, freq="Q")
+        ytd_rows.append(
+            {
+                "date": period.to_timestamp(how="start"),
+                "ytd_mn_usd": value,
+                "source_file": path.name,
+            }
+        )
+        print(f"[cbu-bop] {period} YTD from {path.name}: {value}")
+
+    ytd = pd.DataFrame(ytd_rows).set_index("date")["ytd_mn_usd"]
+    flows = ytd_to_quarterly(ytd)
+    flows.index = flows.index.to_timestamp(how="start")
+    out = pd.DataFrame({"remittances_mn_usd": flows, "ytd_mn_usd": ytd})
+    out.to_csv(cache_path)
+    print(f"[cbu-bop] wrote {cache_path} ({len(flows)} quarters)")
+    return out
 
 
 def pull_stat_uz_cpi() -> pd.DataFrame:
