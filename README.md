@@ -21,3 +21,32 @@ using the country's 2017 currency unification as a natural experiment.
 ## Status
 
 Data collection stage — see [Issues](./issues) for progress.
+
+## Remittances proxy (read this before trusting the series)
+
+CBU's Addenda 1 table does **not** publish "Personal transfers" or
+"Compensation of employees" as separate lines — only the aggregates
+"Secondary income, credit" and "Primary income, credit." v1 of this
+project uses **Secondary income, credit** as the remittances proxy.
+That overstates true remittances (it includes current transfers that
+are not household remittances: general-government transfers, NGO
+grants, etc.).
+
+TODO(v2): switch to the IMF BOP database (data.imf.org) disaggregated
+series — personal transfers + compensation of employees — once that
+pull is implemented.
+
+The CBU PDF/DOCX releases are **year-to-date cumulative**, not discrete
+quarterly flows. `ytd_to_quarterly()` differences them (Q2 = H1 − Q1,
+and so on). Dropping that step would count Q1 several times by year-end.
+
+Drop English releases from
+[cbu.uz/en/publications/balance-of-payments/](https://cbu.uz/en/publications/balance-of-payments/)
+into `data/raw/manual/` (names like `eng_BOP_IIP_ED_2025Q3.pdf`; prefer
+the `.docx` twin for 2019–2023), then:
+
+```
+python src/data_pull.py          # FX + FRED (cached under data/raw/)
+PYTHONPATH=src python -c "from data_pull import pull_cbu_bop_remittances; pull_cbu_bop_remittances()"
+python src/build_panel.py        # writes data/processed/panel.csv
+```

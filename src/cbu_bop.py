@@ -148,7 +148,14 @@ def parse_secondary_income_from_text(text: str, reporting_year: int) -> float:
             "Addenda 1 (analytic presentation), not the narrative charts."
         )
 
-    header_window = "\n".join(lines[max(0, value_line_idx - 12) : value_line_idx])
+    header_start = 0
+    for j in range(value_line_idx - 1, max(-1, value_line_idx - 40), -1):
+        if "addenda 1" in lines[j].lower():
+            header_start = j
+            break
+    else:
+        header_start = max(0, value_line_idx - 40)
+    header_window = "\n".join(lines[header_start:value_line_idx])
     years = _years_from_text(header_window)
     if reporting_year in years and len(years) == len(numbers):
         return numbers[years.index(reporting_year)]
@@ -240,9 +247,12 @@ def ytd_to_quarterly(ytd: pd.Series) -> pd.Series:
         Q4 flow = YTD_FY  - YTD_9M
 
     YTD resets on January 1, so 2025Q1 is NOT differenced against 2024Q4.
-    If Qn exists but Q(n-1) does not, that quarter is NaN and a warning is
-    printed — using the YTD figure as if it were the quarterly flow would
-    be the same class of error as skipping the difference entirely.
+    If Qn YTD exists but Q(n-1) YTD does not, that quarter's *flow* is NaN
+    and a warning is printed — using the YTD figure as if it were the
+    quarterly flow would be the same class of error as skipping the
+    difference entirely. A later quarter can still be differenced if its
+    immediate predecessor YTD is present (Q3 − Q2 YTD is valid even when
+    Q2's own flow is unknown because Q1 is missing).
     """
     if ytd.empty:
         raise ValueError("ytd_to_quarterly() got an empty series.")
